@@ -52,7 +52,8 @@ void alarmHandler(int signal)
 }
 
 int read_command(int fd, unsigned char A, unsigned char C, unsigned char *RPT);
-int calculate_BCC2(unsigned char *data, int size, unsigned char *result);
+//int calculate_BCC2(unsigned char *data, int size, unsigned char *result);
+int send_chunk(int fd, unsigned char *chunk, int size);
 
 int main(int argc, char *argv[])
 {
@@ -126,7 +127,7 @@ int main(int argc, char *argv[])
     (void)signal(SIGALRM, alarmHandler);
 
     // DATA TO BE SENT 
-    unsigned char data[5] = {0x0A, 0x0B, 0x0C, 0x0D, 0x0E}; 
+    unsigned char data[5] = {0x0A, 0x0B, 0x7D, 0x0D, 0x0E}; 
     // SET command
     unsigned char SET[5] = {0x7E, 0x03, 0x03, 0x00, 0x7E};
     // DISC command
@@ -150,31 +151,15 @@ int main(int argc, char *argv[])
     // READ ------------------------------------------------------------
     
     // Read UA command and wait
-    if (read_command(fd, 0x03, 0x07, SET))
+    /*if (read_command(fd, 0x03, 0x07, SET))
     {
         printf("An error has occured reading UA\n");
-    }
+    }*/
     //printf("UA command received successfully!\n");
     // If we reach this point we can start sending I frames
     
-    // Construct I frame
-    unsigned char data_frame[6+5];
-
-    // I0
-    data_frame[0] = FLAG;
-    data_frame[1] = 0x03;
-    data_frame[2] = 0x00;
-    data_frame[3] = data_frame[2]^data_frame[3];
-    for (int i = 0; i < 5; i++)
-    {
-        data_frame[4+i] = data[i];
-    }
-    unsigned char BCC2 = 0;
-    calculate_BCC2(data, 5, &BCC2);
-    data_frame[9] = BCC2;
-    data_frame[10] = FLAG;
-
-
+    send_chunk(fd, data, 5);
+    
 
     //------------------------------------------------------------------
 
@@ -272,7 +257,7 @@ int read_command(int fd, unsigned char A, unsigned char C, unsigned char *RPT)
     return 0;
 }
 
-int calculate_BCC2(unsigned char *data, int size, unsigned char *result)
+/*int calculate_BCC2(unsigned char *data, int size, unsigned char *result)
 {
     if (size < 2)
     {
@@ -287,13 +272,18 @@ int calculate_BCC2(unsigned char *data, int size, unsigned char *result)
         BCC2 = BCC2 ^ data[i];
     }
 
+    if (BCC2 == 0x7E || BCC2 == 0x7D)
+    {
+        BCC2 = (0x7D << 4) | (BCC2^0x20);
+    }
+
     result = BCC2;
 
     return 0;
-}
+}*/
 
 // Send a chunk of data to the serial port
-int send_chunk(fd, unsigned char *chunk, int size)
+int send_chunk(int fd, unsigned char *chunk, int size)
 {
     // The chunk needs to be constructed into an I frame.
     // We'll need 6 bytes for the frame header and footer, however
@@ -311,23 +301,67 @@ int send_chunk(fd, unsigned char *chunk, int size)
         }
     }
 
+    // BCC2 may also need byte stuffing
+    int is_BCC2_stuffed = FALSE;
+    unsigned char extra_BCC2 = 0;
+    unsigned char BCC2 = chunk[0] ^ chunk[1];
+
+    for (int i = 2; i < size; i++)
+    {
+        BCC2 = BCC2 ^ chunk[i];
+    }
+
+    if (BCC2 == 0x7E || BCC2 == 0x7D)
+    {
+        is_BCC2_stuffed = TRUE;
+        extra_BCC2 = BCC2 ^ 0x20;
+    }
+
     // We can now allocate the I frame with the correct size
-    unsigned char I_frame[6+final_size];
+    unsigned char I_frame[6 + final_size + is_BCC2_stuffed];
 
     // Construct the I frame
     I_frame[0] = FLAG;                      // Flag
     I_frame[1] = 0x03;                      // A
     I_frame[2] = 0x00;                      // C
-    I_frame[3] = I_frame[2]^I_frame[3];     // BCC1
+    I_frame[3] = I_frame[1]^I_frame[2];     // BCC1
     
     // In order to create the data field of the I frame we need to
     // take into account byte stuffing. This occurs if 0x7E or 0x7D 
     // are found in the data field. If so, the byte 0x7D is sent
     // followed by the byte XORed with 0x20.
+    int pos = 0;
+    while (pos < final_size)
+    {
+        if (chunk[pos] == 0x7E || chunk[pos] == 0x7D)
+        {
+            I_frame[4+pos] = 0x7D;
+            I_frame[5+pos] = chunk[pos] ^ 0x20;
+            pos += 2;
+        }
+        else
+        {
+            I_frame[4+pos] = chunk[pos];
+            pos++;
+        }
+    }
 
-    
-    unsigned char BCC2 = 0;
-    calculate_BCC2(chunk, size, &BCC2); 
+    //calculate_BCC2(chunk, size, &BCC2);   // BCC2 is performed with the original data
     I_frame[4+size] = BCC2;                 // BCC2
-    I_frame[5+size] = FLAG;                 // Flag
+    if (is_BCC2_stuffed)
+        I_frame[5+size] = extra_BCC2;
+    I_frame[5+size+is_BCC2_stuffed] = FLAG; // Flag
+
+
+    // write to port
+    int bytes = write(fd, I_frame, 6+final_size+is_BCC2_stuffed);
+    printf("%d, %d\n", is_BCC2_stuffed, final_size);
+    printf("%d bytes written\n", bytes);
+    for (int i = 0; i < 6+final_size+is_BCC2_stuffed; i++)
+    {
+        printf("Sent: 0x%02X, ", I_frame[i]);
+    }
+    printf("\n");
+    // Wait until all bytes have been written to the serial port
+    sleep(1);
 }
