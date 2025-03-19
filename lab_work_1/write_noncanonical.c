@@ -1,6 +1,9 @@
-// Write to serial port in non-canonical mode
-//
-// Modified by: Eduardo Nuno Almeida [enalmeida@fe.up.pt]
+// RC 24/25 
+/*
+*   José Santos and José Filipe
+*   Description: 
+*   This is the transmitter side of a program that sends files between two computers using an RS-232 connection.
+*/
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -15,31 +18,42 @@
 // Baudrate settings are defined in <asm/termbits.h>, which is
 // included by <termios.h>
 #define BAUDRATE B38400
-#define _POSIX_SOURCE 1 // POSIX compliant source
+#define _POSIX_SOURCE 1 // POSIX compliant source.
 
 #define FALSE 0
 #define TRUE 1
 
 #define BUF_SIZE 5
+#define ALARM_TIMEOUT 3  // Alarm timeout in seconds.
 
+// Define the flag we are using for this protocol.
 #define FLAG 0x7E
-#define A_BYTE 0x03
-#define C_BYTE 0x07
 
-volatile int STOP = FALSE;
+// Keep track when we need to repeat the last command sent.
 volatile int REPEAT_SET = 0;
 
+// Define the states of the state machine.
+//volatile int STOP = FALSE;
 enum STATE {
     START,
     FLAG_RCV,
     A_RCV,
     C_RCV, 
-    BCC_OK
+    BCC_OK,
+    STOP
 };
 
-// ALARM VARIABLES
+// Alarm variables. 
 int alarmEnabled = FALSE;
 int alarmCount = 0;
+
+// Fixed commands that will be sent or read.
+// SET command
+unsigned char SET[5] = {0x7E, 0x03, 0x03, 0x00, 0x7E};
+// DISC command
+unsigned char DISC[5] = {0x7E, 0x03, 0x0B, 0x03^0x0B, 0x7E};
+// UA command
+unsigned char UA[5] = {0x7E, 0x03, 0x07, 0x03^0x07, 0x7E};
 
 // Alarm function handler
 void alarmHandler(int signal)
@@ -51,8 +65,20 @@ void alarmHandler(int signal)
 	
 }
 
-int read_command(int fd, unsigned char A, unsigned char C, unsigned char *RPT);
-//int calculate_BCC2(unsigned char *data, int size, unsigned char *result);
+// Function prototypes
+
+/*
+*   Reads incomming bytes until a valid command is received.
+*
+*   @param fd File descriptor of the serial port.
+*   @param *CMD - Pointer to the command to be read.
+*
+*   @returns 0 if successful, -1 if *CMD or *RPT is NULL and -2 if alarm timeout is reached.
+*/
+int read_command(int fd, unsigned char *CMD, unsigned char *RPT);
+/*
+*
+*/
 int send_chunk(int fd, unsigned char *chunk, int size);
 
 int main(int argc, char *argv[])
@@ -120,48 +146,64 @@ int main(int argc, char *argv[])
     }
 
     printf("New termios structure set\n");
-    
-    // SEND ------------------------------------------------------------
+
 
 	// Set alarm function handler
     (void)signal(SIGALRM, alarmHandler);
 
-    // DATA TO BE SENT 
+    // Data to be sent
     unsigned char data[5] = {0x0A, 0x0B, 0x7D, 0x0D, 0x0E}; 
-    // SET command
-    unsigned char SET[5] = {0x7E, 0x03, 0x03, 0x00, 0x7E};
-    // DISC command
-    unsigned char DISC[5] = {0x7E, 0x03, 0x0B, 0x03^0x0B, 0x7E};
-    // UA command
-    unsigned char UA[5] = {0x7E, 0x03, 0x07, 0x03^0x07, 0x7E};
 
-    // Write SET command
-    int bytes = write(fd, SET, BUF_SIZE);
-    printf("%d bytes written\n", bytes);
-    for (int i = 0; i < BUF_SIZE; i++)
+    // transmission loop
+    while (1)
     {
-        printf("Sent: 0x%02X, ", SET[i]);
+        // Write SET command to begin communication
+        printf("Sending SET command...\n");
+        int bytes = write(fd, SET, BUF_SIZE);
+
+        // Wait until all bytes have been written to the serial port
+        sleep(1);
+
+        if (bytes == BUF_SIZE)
+        {
+            printf("%d bytes written\nSent:\n", bytes);
+            for (int i = 0; i < BUF_SIZE; i++)
+            {
+                printf("0x%02X, ", SET[i]);
+            }
+            printf("\n");
+        }
+        else if (bytes == -1)
+        {
+            perror("write");
+            break;
+            //exit(-1);
+        }
+
+        // Read UA command and wait
+        int err = read_command(fd, UA, SET);
+        if (err == -1)
+        {
+            printf("NULL command\n");
+            break;
+        }
+        else if (err == -2)
+        {
+            printf("Read timed out. Did not receive any response.\n"
+                   "The program will end.\n");
+            break;
+        }
+        else
+        {
+            printf("UA command received successfully!\n");
+        }
+
+        // If we reach this point connection is established and we can start sending data.
+    
+        send_chunk(fd, data, 5);
+        break;
     }
-    printf("\n");
-    // Wait until all bytes have been written to the serial port
-    sleep(1);
-
-    //------------------------------------------------------------------
-
-    // READ ------------------------------------------------------------
     
-    // Read UA command and wait
-    /*if (read_command(fd, 0x03, 0x07, SET))
-    {
-        printf("An error has occured reading UA\n");
-    }*/
-    //printf("UA command received successfully!\n");
-    // If we reach this point we can start sending I frames
-    
-    send_chunk(fd, data, 5);
-    
-
-    //------------------------------------------------------------------
 
     // Restore the old port settings
     if (tcsetattr(fd, TCSANOW, &oldtio) == -1)
@@ -175,14 +217,23 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-int read_command(int fd, unsigned char A, unsigned char C, unsigned char *RPT)
+int read_command(int fd, unsigned char *CMD, unsigned char *RPT)
 {
+    // return if NULL
+    if (CMD == NULL || RPT == NULL)
+    {
+        return -1;
+    }
+    
     unsigned char in_byte = 0;
-    int state = START;
-
+    unsigned char A = CMD[1];
+    unsigned char C = CMD[2];
     unsigned char BCC1 = A^C;
+    
+    int state = START;
+    int run = TRUE;
 
-    while (STOP == FALSE)
+    while (run)
     {
         if (alarmEnabled == FALSE)
         {
@@ -195,10 +246,15 @@ int read_command(int fd, unsigned char A, unsigned char C, unsigned char *RPT)
 			sleep(1);
 			REPEAT_SET = 0;
 	    }
+        if (alarmCount > ALARM_TIMEOUT)
+        {
+            //printf("Read timed out. Did not receive any response from receiver side.\n");
+            return -2;
+        }
         
         int bytes = read(fd, &in_byte, 1);
-        printf("Current state: %d\n", state);
-        printf("Byte read: 0x%02X\n", in_byte);
+        //printf("Current state: %d\n", state);
+        //printf("Byte read: 0x%02X\n", in_byte);
         
         switch (state)
         {
@@ -237,13 +293,16 @@ int read_command(int fd, unsigned char A, unsigned char C, unsigned char *RPT)
             case BCC_OK:
                 if (in_byte == FLAG)
                 {
-                    STOP = TRUE;
-                    printf("Read successfull\n");
+                    state = STOP;
+                    //printf("Read successfull\n");
                     alarm(0); // Disable alarm
                     alarmEnabled = FALSE;
                 }
                 else
                     state = START;
+                break;
+            case STOP:
+                    run = FALSE;
                 break;
 
             default:
@@ -251,36 +310,11 @@ int read_command(int fd, unsigned char A, unsigned char C, unsigned char *RPT)
                 break;
         }
 
-        printf("New state: %d\n", state);
+        //printf("New state: %d\n", state);
     }
-    STOP = FALSE;
+
     return 0;
 }
-
-/*int calculate_BCC2(unsigned char *data, int size, unsigned char *result)
-{
-    if (size < 2)
-    {
-        printf("Cannot perform XOR on array with size less than 2");
-        return -1;
-    }
-
-    unsigned char BCC2 = data[0] ^ data[1];
-
-    for (int i = 2; i < size; i++)
-    {
-        BCC2 = BCC2 ^ data[i];
-    }
-
-    if (BCC2 == 0x7E || BCC2 == 0x7D)
-    {
-        BCC2 = (0x7D << 4) | (BCC2^0x20);
-    }
-
-    result = BCC2;
-
-    return 0;
-}*/
 
 // Send a chunk of data to the serial port
 int send_chunk(int fd, unsigned char *chunk, int size)
