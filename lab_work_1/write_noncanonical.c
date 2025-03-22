@@ -24,6 +24,7 @@
 #define TRUE 1
 
 #define BUF_SIZE 5
+#define MAX_SIZE 255
 #define ALARM_TIMEOUT 3  // Alarm timeout in seconds.
 
 // Define the flag we are using for this protocol.
@@ -55,6 +56,22 @@ unsigned char DISC[5] = {0x7E, 0x03, 0x0B, 0x03^0x0B, 0x7E};
 // UA command
 unsigned char UA[5] = {0x7E, 0x03, 0x07, 0x03^0x07, 0x7E};
 
+struct applicationLayer
+{
+    int fileDescriptor; /*Descritor correspondente à porta série*/
+    int status;         /*TRANSMITTER | RECEIVER*/
+};
+
+struct linkLayer
+{
+    char port[20]; /*Dispositivo /dev/ttySx, x = 0, 1*/
+    int baudRate;  /*Velocidade de transmissão*/
+    unsigned int sequenceNumber; /*Número de sequência da trama: 0, 1*/
+    unsigned int timeout; /*Valor do temporizador: 1 s*/
+    unsigned int numTransmissions; /*Número de tentativas em caso de falha*/
+    char frame[MAX_SIZE]; /*Trama*/
+};
+
 // Alarm function handler
 void alarmHandler(int signal)
 {
@@ -66,6 +83,39 @@ void alarmHandler(int signal)
 }
 
 // Function prototypes
+
+// Apllication layer functions
+
+/*
+*   Establishes a connection between the transmitter and the receiver.
+*
+*   @param fd File descriptor of the serial port.
+*   @param status Status of the connection.
+*
+*   @returns 0 if successful, -1 if the connection could not be established.
+*/
+int llopen(int fd, int status);
+
+/*
+*   Sends a file to the receiver.
+*   
+*   @param fd File descriptor of the serial port.
+*   @param *buffer Pointer to the buffer containing the file to be sent.
+*
+*   @returns 0 if successful, -1 if the file could not be sent.
+*/
+int llwrite(int fd, unsigned char *buffer);
+
+/*
+*   Closes the connection between the transmitter and the receiver.
+*   
+*   @param fd File descriptor of the serial port.
+*
+*   @returns 0 if successful, -1 if the connection could not be closed.
+*/
+int llclose(int fd);
+
+// Data link layer functions
 
 /*
 *   Reads incomming bytes until a valid command is received.
@@ -152,7 +202,7 @@ int main(int argc, char *argv[])
     (void)signal(SIGALRM, alarmHandler);
 
     // Data to be sent
-    unsigned char data[5] = {0x0A, 0x0B, 0x7D, 0x0D, 0x0E}; 
+    unsigned char data[5] = {0x0A, 0x0B, 0x7E, 0x0D, 0x0E}; 
 
     // transmission loop
     while (1)
@@ -201,6 +251,7 @@ int main(int argc, char *argv[])
         // If we reach this point connection is established and we can start sending data.
     
         send_chunk(fd, data, 5);
+
         break;
     }
     
@@ -316,7 +367,7 @@ int read_command(int fd, unsigned char *CMD, unsigned char *RPT)
     return 0;
 }
 
-// Send a chunk of data to the serial port
+// Send a chunk of data to the serial port (I_frame)
 int send_chunk(int fd, unsigned char *chunk, int size)
 {
     // The chunk needs to be constructed into an I frame.
@@ -337,10 +388,10 @@ int send_chunk(int fd, unsigned char *chunk, int size)
 
     // BCC2 may also need byte stuffing
     int is_BCC2_stuffed = FALSE;
-    unsigned char extra_BCC2 = 0;
-    unsigned char BCC2 = chunk[0] ^ chunk[1];
+    unsigned char BCC2 = 0;
 
-    for (int i = 2; i < size; i++)
+    // BCC2 is calculated with the original data
+    for (int i = 0; i < size; i++)
     {
         BCC2 = BCC2 ^ chunk[i];
     }
@@ -348,7 +399,6 @@ int send_chunk(int fd, unsigned char *chunk, int size)
     if (BCC2 == 0x7E || BCC2 == 0x7D)
     {
         is_BCC2_stuffed = TRUE;
-        extra_BCC2 = BCC2 ^ 0x20;
     }
 
     // We can now allocate the I frame with the correct size
@@ -364,27 +414,33 @@ int send_chunk(int fd, unsigned char *chunk, int size)
     // take into account byte stuffing. This occurs if 0x7E or 0x7D 
     // are found in the data field. If so, the byte 0x7D is sent
     // followed by the byte XORed with 0x20.
-    int pos = 0;
-    while (pos < final_size)
+    int pos = 0, frame_pos = 0;
+    while (pos < size)
     {
         if (chunk[pos] == 0x7E || chunk[pos] == 0x7D)
         {
-            I_frame[4+pos] = 0x7D;
-            I_frame[5+pos] = chunk[pos] ^ 0x20;
-            pos += 2;
+            I_frame[4+frame_pos] = 0x7D;
+            I_frame[5+frame_pos] = chunk[pos] ^ 0x20;
+            frame_pos += 2;
         }
         else
         {
-            I_frame[4+pos] = chunk[pos];
-            pos++;
+            I_frame[4+frame_pos] = chunk[pos];
+            frame_pos++;
         }
+        pos++;
     }
 
-    //calculate_BCC2(chunk, size, &BCC2);   // BCC2 is performed with the original data
-    I_frame[4+size] = BCC2;                 // BCC2
     if (is_BCC2_stuffed)
-        I_frame[5+size] = extra_BCC2;
-    I_frame[5+size+is_BCC2_stuffed] = FLAG; // Flag
+    {
+        I_frame[5+final_size] = 0x7D;
+        I_frame[6+final_size] = BCC2 ^ 0x20;
+    }
+    else
+    {
+        I_frame[5+final_size] = BCC2;
+    }
+    I_frame[5+final_size+is_BCC2_stuffed] = FLAG; // Flag
 
 
     // write to port
