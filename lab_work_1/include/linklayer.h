@@ -38,7 +38,8 @@
 
 #define BUF_SIZE 5
 #define MAX_SIZE 255
-#define ALARM_TIMEOUT 3  // Alarm timeout in seconds.
+#define ALARM_TIMEOUT 10  // Alarm timeout in seconds.
+#define MAX_RETRIES 10
 
 // Define the flag we are using for this protocol.
 #define FLAG 0x7E
@@ -83,7 +84,7 @@ int llread(int fd, unsigned char *buffer);
 *
 *   @returns 0 if successful, -1 if the connection could not be closed.
 */
-int llclose(int fd);
+int llclose(int fd, int role);
 
 // Data link layer functions
 

@@ -15,7 +15,7 @@
 #include <unistd.h>
 #include <signal.h>
 
-//#define DEBUG
+#define DEBUG
 
 #include "../include/linklayer.h"
 
@@ -86,29 +86,35 @@ int main(int argc, char *argv[])
 
     packet[0] = START;
     packet[1] = FILE_SIZE;
-    packet[2] = sizeof(long); // file size is a long
-    packet[2] = (fileSize >> 24) & 0xFF;
-    packet[3] = (fileSize >> 16) & 0xFF;
-    packet[4] = (fileSize >> 8) & 0xFF;
-    packet[5] = fileSize & 0xFF;
-    packet[6] = FILE_NAME;
-    if (strlen(argv[2]) > (MAX_SIZE-7))
+    packet[2] = sizeof(fileSize); // file size is a long
+    packet[3] = (fileSize >> 24) & 0xFF;
+    packet[4] = (fileSize >> 16) & 0xFF;
+    packet[5] = (fileSize >> 8) & 0xFF;
+    packet[6] = fileSize & 0xFF;
+    packet[7] = FILE_NAME;
+    if (strlen(argv[2]) > (MAX_SIZE-8))
     {
         printf("File name is too long\n");
         exit(1);
     }
-    strcpy((char *)&packet[7], argv[2]);
+    strcpy((char *)&packet[8], argv[2]);
 
-    int bytes = llwrite(fd, packet, strlen(argv[2]) + 7);
+    int bytes = llwrite(fd, packet, strlen(argv[2]) + 8);
     if (bytes == -1)
     {
         printf("Error sending file size and name\n");
         exit(1);
     }
+    while (llwrite(fd, packet, strlen(argv[2]) + 8) == -2)
+    {
+        printf("Rejected, will try again\n");
+    }
 
+    sleep(1);
+    
     // Start sending the file in data packets
 
-    llclose(fd);
+    llclose(fd, TX);
     close(file);
 
     return 0;

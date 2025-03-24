@@ -11,181 +11,119 @@
 #include <termios.h>
 #include <unistd.h>
 
-// Baudrate settings are defined in <asm/termbits.h>, which is
-// included by <termios.h>
-#define BAUDRATE B38400
-#define _POSIX_SOURCE 1 // POSIX compliant source
+#define DEBUG
 
-#define FALSE 0
-#define TRUE 1
+#include "../include/linklayer.h"
 
-#define BUF_SIZE 5
+// Define roles for the connection
+#define RX 0
+#define TX 1
 
-#define FLAG 0x7E
-#define A_BYTE 0x03
-#define C_BYTE 0x03
+// Application layer control field values
+#define START 0x02
+#define END 0x03
+#define DATA 0x01
 
-volatile int STOP = FALSE;
+#define FILE_SIZE 0x00
+#define FILE_NAME 0x01
 
-enum STATE {
-    START,
-    FLAG_RCV,
-    A_RCV,
-    C_RCV, 
-    BCC_OK
-};
+#define ROLE RX
 
 int main(int argc, char *argv[])
 {
-    // Program usage: Uses either COM1 or COM2
-    const char *serialPortName = argv[1];
-
-    if (argc < 2)
+    // Check if the program was called with the correct arguments
+    if (argc < 3)
     {
         printf("Incorrect program usage\n"
-               "Usage: %s <SerialPort>\n"
-               "Example: %s /dev/ttyS1\n",
+               "Usage: %s <SerialPortNumber> <FilePath>\n"
+               "Example: %s 1 file.gif\n",
                argv[0],
                argv[0]);
         exit(1);
     }
 
-    // Open serial port device for reading and writing and not as controlling tty
-    // because we don't want to get killed if linenoise sends CTRL-C.
-    int fd = open(serialPortName, O_RDWR | O_NOCTTY);
-    if (fd < 0)
+    // In the case of the receiver file path will be 
+    // the path to store the received file
+    char *file_path = argv[2];
+    char file_name[MAX_SIZE];
+    long fileSize = 0;
+
+    // O_WRONLY -> Write only mode
+    // O_CREAT -> Create the file if it does not exist
+    // O_TRUNC -> Truncate the file to 0 bytes if it exists (Clear the file)
+    // 0666 -> File permissions
+    int file = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (file < 0)
     {
-        perror(serialPortName);
-        exit(-1);
+        fprintf(stderr, "Error creating file %s\n", file_path);
+        exit(1);
     }
 
-    struct termios oldtio;
-    struct termios newtio;
+    // Read the serial port number
+    const char *portNumberString = argv[1];
+    int portNumber = atoi(portNumberString);
 
-    // Save current port settings
-    if (tcgetattr(fd, &oldtio) == -1)
+    // Begin communication in RX mode
+    int fd = llopen(portNumber, RX);
+    if (fd == -1)
     {
-        perror("tcgetattr");
-        exit(-1);
+        printf("Connection could not be established\n");
+        exit(1);
     }
 
-    // Clear struct for new port settings
-    memset(&newtio, 0, sizeof(newtio));
-
-    newtio.c_cflag = BAUDRATE | CS8 | CLOCAL | CREAD;
-    newtio.c_iflag = IGNPAR;
-    newtio.c_oflag = 0;
-
-    // Set input mode (non-canonical, no echo,...)
-    newtio.c_lflag = 0;
-    newtio.c_cc[VTIME] = 0; // Inter-character timer unused
-    newtio.c_cc[VMIN] = 5;  // Blocking read until 5 chars received
-
-    // VTIME e VMIN should be changed in order to protect with a
-    // timeout the reception of the following character(s)
-
-    // Now clean the line and activate the settings for the port
-    // tcflush() discards data written to the object referred to
-    // by fd but not transmitted, or data received but not read,
-    // depending on the value of queue_selector:
-    //   TCIFLUSH - flushes data received but not read.
-    tcflush(fd, TCIOFLUSH);
-
-    // Set new port settings
-    if (tcsetattr(fd, TCSANOW, &newtio) == -1)
+    // Read the file metadata
+    unsigned char rcv_packet[MAX_SIZE];
+    int rcv_packet_size = llread(fd, rcv_packet);
+    if (rcv_packet_size < 0)
     {
-        perror("tcsetattr");
-        exit(-1);
+        printf("Error reading file metadata\n");
+        exit(1);
     }
 
-    printf("New termios structure set\n");
+    #ifdef DEBUG
+    printf("Received packet:\n");
+    for (int i = 0; i < rcv_packet_size; i++)
+    {
+        printf("0x%02X, ", rcv_packet[i]);
+    }
+    printf("\n");
+    #endif
 
-    // Set the initial state of the machine
-    int state = START;
+    // Check if the received packet is a START packet
+    if (rcv_packet[0] != START)
+    {
+        printf("Error: Expected START packet\n");
+        exit(1);
+    }
 
-    // Loop for input
-    //unsigned char buf[BUF_SIZE + 1] = {0}; // +1: Save space for the final '\0' char
-    unsigned char reply[BUF_SIZE] = {0x7E, 0x03, 0x07, 0x03^0x07, 0x7E};
-
-    unsigned char in_byte = 0;
-    int bytes = 0;
-
-    while (STOP == FALSE)
-    {   
-        bytes = read(fd, &in_byte, 1);
-        printf("Current state: %d\n", state);
-        printf("Byte read: 0x%02X\n", in_byte);
-        
-        switch (state)
+    if (rcv_packet[1] == FILE_SIZE)
+    {
+        // Get the file size in bytes
+        for (int i = 0; i < rcv_packet[2]; i++)
         {
-            case START:
-                if (in_byte == FLAG)
-                    state = FLAG_RCV;
-                break;
-
-            case FLAG_RCV:
-                if (in_byte == A_BYTE)
-                    state = A_RCV;
-                else if (in_byte == FLAG)
-                    state = FLAG_RCV;
-                else
-                    state = START;
-                break;
-
-            case A_RCV:
-                if (in_byte == FLAG)
-                    state = FLAG_RCV;
-                else if (in_byte == C_BYTE)
-                    state = C_RCV;
-                else 
-                    state = START;
-                break;
-
-            case C_RCV:
-                if (in_byte == (A_BYTE^C_BYTE))
-                    state = BCC_OK;
-                else if (in_byte == FLAG)
-                    state = FLAG_RCV;
-                else
-                    state = START;
-                break;
-
-            case BCC_OK:
-                if (in_byte == FLAG)
-                    STOP = TRUE;
-                else
-                    state = START;
-                break;
-
-            default:
-                state = START;
-                break;
+            fileSize |= rcv_packet[i + 3] << (8 * (3 - i));
         }
-
-        printf("New state: %d\n", state);
     }
-
-    bytes = write(fd, reply, BUF_SIZE);
-    printf("%d bytes written\n", bytes);
-
-    // Wait until all bytes have been written to the serial port
-    sleep(1);
-
-    unsigned char DISC[5] = {0x7E, 0x03, 0x0B, 0x03^0x0B, 0x7E};
-
-    write(fd, DISC, BUF_SIZE);
-
-    // The while() cycle should be changed in order to respect the specifications
-    // of the protocol indicated in the Lab guide
-
-    // Restore the old port settings
-    if (tcsetattr(fd, TCSANOW, &oldtio) == -1)
+    else
     {
-        perror("tcsetattr");
-        exit(-1);
+        printf("Error: Expected file size in START packet\n");
+        //exit(1);
     }
 
-    close(fd);
+    if (rcv_packet[3 + rcv_packet[2]] == FILE_NAME)
+    {
+        strcpy(file_name, (char *)&rcv_packet[4 + rcv_packet[2]]);
+    }
+    else
+    {
+        printf("Error: Expected file name in START packet\n");
+        //exit(1);
+    }
+
+    printf("Receiving file: %s\nSize: %ld bytes\n", file_name, fileSize);
+
+    close(file);
+    llclose(fd, RX);
 
     return 0;
 }
