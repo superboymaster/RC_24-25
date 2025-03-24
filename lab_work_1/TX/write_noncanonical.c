@@ -64,9 +64,9 @@ int main(int argc, char *argv[])
         exit(1);
     }
     // Get the file size in bytes.
-    long fileSize = fileStat.st_size;
+    unsigned int fileSize = fileStat.st_size;
 
-    printf("File: %s\nSize: %ld bytes\n", argv[2], fileSize);
+    printf("File: %s\nSize: %d bytes\n", argv[2], fileSize);
 
     // Read the serial port number
     const char *portNumberString = argv[1];
@@ -86,11 +86,15 @@ int main(int argc, char *argv[])
 
     packet[0] = START;
     packet[1] = FILE_SIZE;
-    packet[2] = sizeof(fileSize); // file size is a long
+    packet[2] = sizeof(int);
+    #ifdef DEBUG 
+    printf("File Size in hex: 0x%04x\n", fileSize);
+    #endif
     packet[3] = (fileSize >> 24) & 0xFF;
     packet[4] = (fileSize >> 16) & 0xFF;
     packet[5] = (fileSize >> 8) & 0xFF;
     packet[6] = fileSize & 0xFF;
+    
     packet[7] = FILE_NAME;
     if (strlen(argv[2]) > (MAX_SIZE-8))
     {
