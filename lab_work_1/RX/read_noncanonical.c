@@ -171,6 +171,10 @@ int main(int argc, char *argv[])
     // Wait until all bytes have been written to the serial port
     sleep(1);
 
+    unsigned char DISC[5] = {0x7E, 0x03, 0x0B, 0x03^0x0B, 0x7E};
+
+    write(fd, DISC, BUF_SIZE);
+
     // The while() cycle should be changed in order to respect the specifications
     // of the protocol indicated in the Lab guide
 

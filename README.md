@@ -6,4 +6,4 @@ Breve resumo de cada elemento do repositório
 | Nome     | Conteúdo |
 | -------- | ------- |
 | AULA 2  | Implementa uma máquina de estados e o exemplo "alarm". |
-| Aula 3  |      |
+| lab_work_1  | Prmeiro trabalho  |
