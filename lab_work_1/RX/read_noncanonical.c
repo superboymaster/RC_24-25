@@ -122,6 +122,48 @@ int main(int argc, char *argv[])
 
     printf("Receiving file: %s\nSize: %ld bytes\n", file_name, fileSize);
 
+    // Read the file data
+    unsigned char data_packet[MAX_SIZE];
+    int data_packet_size = 0;
+    int total_bytes = 0;
+
+    while (total_bytes < fileSize)
+    {
+        data_packet_size = llread(fd, data_packet);
+        if (data_packet_size < 0)
+        {
+            printf("Error reading data packet\n");
+            exit(1);
+        }
+
+        #ifdef DEBUG
+        printf("Received packet:\n");
+        for (int i = 0; i < data_packet_size; i++)
+        {
+            printf("0x%02X, ", data_packet[i]);
+        }
+        printf("\n");
+        #endif
+
+        if (data_packet[0] != DATA)
+        {
+            printf("Error: Expected DATA packet\n");
+            exit(1);
+        }
+
+        int data_size = (data_packet[1] << 8) | data_packet[2];
+        total_bytes += data_size;
+
+        if (write(file, &data_packet[3], data_size) < 0)
+        {
+            printf("Error writing to file\n");
+            exit(1);
+        }
+    }
+
+    // Close the file and the connection
+    
+
     close(file);
     llclose(fd, RX);
 

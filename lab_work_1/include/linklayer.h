@@ -38,11 +38,16 @@
 
 #define BUF_SIZE 5
 #define MAX_SIZE 255
-#define ALARM_TIMEOUT 10  // Alarm timeout in seconds.
-#define MAX_RETRIES 10
+#define ALARM_TIMEOUT 5  // Alarm timeout in seconds.
+#define MAX_RETRIES 3
 
 // Define the flag we are using for this protocol.
 #define FLAG 0x7E
+
+// Error defines
+#define TIMEOUT_ERROR -2
+#define DEFAULT_ERROR -1
+
 
 // Alarm function handler
 void alarmHandler(int signal);

@@ -74,9 +74,14 @@ int main(int argc, char *argv[])
 
     // Begin communication
     int fd = llopen(portNumber, TX);
-    if (fd == -1)
+    if (fd == DEFAULT_ERROR)
     {
         printf("Connection could not be established\n");
+        exit(1);
+    }
+    else if (fd == TIMEOUT_ERROR)
+    {
+        printf("Connection time out. The program will now close.\n");
         exit(1);
     }
 
@@ -117,6 +122,49 @@ int main(int argc, char *argv[])
     sleep(1);
     
     // Start sending the file in data packets
+    int bytesRead = 0;
+    int packet_size = 3;
+
+    unsigned char file_data[MAX_SIZE];
+    packet[0] = DATA;
+    
+    while ((bytesRead = read(file, file_data, MAX_SIZE)) > 0)
+    {
+        packet_size = bytesRead + 3;
+
+        packet[1] = (bytesRead >> 8);
+        packet[2] = bytesRead & 0xFF;
+
+        for (int i = 0; i < bytesRead; i++)
+        {
+            packet[i + 3] = file_data[i];
+        }
+        
+        
+        bytes = llwrite(fd, packet, packet_size);
+        if (bytes == -1)
+        {
+            printf("Error sending file\n");
+            exit(1);
+        }
+        while (llwrite(fd, file_data, bytesRead) == -2)
+        {
+            printf("Rejected, will try again\n");
+        }
+    }
+
+    // Send END packet
+    packet[0] = END;
+    bytes = llwrite(fd, packet, 1); 
+    if (bytes == -1)
+    {
+        printf("Error sending file\n");
+        exit(1);
+    }
+    while (llwrite(fd, packet, 1) == -2)
+    {
+        printf("Rejected, will try again\n");
+    }
 
     llclose(fd, TX);
     close(file);

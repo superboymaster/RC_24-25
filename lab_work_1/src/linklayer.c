@@ -6,7 +6,7 @@
 static struct termios oldtio, newtio;
 
 // Keep track when we need to repeat the last command sent.
-volatile int REPEAT_SET = 0;
+volatile int RETRANSMIT = FALSE;
 
 // Define the states of the state machine.
 //volatile int STOP = FALSE;
@@ -37,8 +37,11 @@ void alarmHandler(int signal)
 {
     alarmEnabled = FALSE;
     alarmCount++;
-    REPEAT_SET = 1;
-    printf("Alarm #%d\n", alarmCount);
+    RETRANSMIT = TRUE;
+
+    #ifdef DEBUG
+    printf("Alarm triggered: No. %d\n", alarmCount);
+    #endif
 	
 }
 
@@ -58,25 +61,36 @@ int read_command(int fd, unsigned char *CMD, unsigned char *RPT)
     int state = START;
     int run = TRUE;
 
+    // Reset the alarm counter
+    alarmCount = 0;
+    alarm(ALARM_TIMEOUT);
+
     while (run)
     {
-        if (alarmEnabled == FALSE)
+        // Verify that we have not exceeded the maximum number of retries.
+        if (alarmCount >= MAX_RETRIES)
         {
-            alarm(3); // Set alarm to be triggered in 3s
+            // Retries exceeded
+            #ifdef DEBUG
+            printf("[Read command] Time out. Returning\n");
+            #endif
+            return TIMEOUT_ERROR;
+        }
+
+        // Check if we need to retransmit and if the command to retransmit is valid.
+        if (RETRANSMIT && RPT != NULL)
+        {
+            // Reset retransmit state
+            RETRANSMIT = FALSE;
+            // Resend frame
+            write(fd, RPT, BUF_SIZE);
+            sleep(1);
+
+            // Assuming we have not yet exceeded the retries, restart the alarm
+            alarm(ALARM_TIMEOUT);
             alarmEnabled = TRUE;
-            //REPEAT_SET = 0;
         }
-        if (REPEAT_SET && RPT != NULL)
-		{
-			write(fd, RPT, BUF_SIZE);
-			sleep(1);
-			REPEAT_SET = 0;
-	    }
-        if (alarmCount > ALARM_TIMEOUT)
-        {
-            //printf("Read timed out. Did not receive any response from receiver side.\n");
-            return -2;
-        }
+ 
         
         int bytes = read(fd, &in_byte, 1);
         //printf("Current state: %d\n", state);
@@ -148,7 +162,7 @@ int llopen(int portNumber, int role)
     if (role != TX && role != RX)
     {
         perror("Invalid role");
-        return -1;
+        return DEFAULT_ERROR;
     }
 
     // Create the serial port name
@@ -163,14 +177,14 @@ int llopen(int portNumber, int role)
     if (fd < 0)
     {
         perror(serialPortName);
-        return -1;
+        return DEFAULT_ERROR;
     }
 
     // Save current port settings
     if (tcgetattr(fd, &oldtio) == -1)
     {
         perror("tcgetattr");
-        return -1;
+        return DEFAULT_ERROR;
     }
 
     // Clear struct for new port settings
@@ -199,7 +213,7 @@ int llopen(int portNumber, int role)
     if (tcsetattr(fd, TCSANOW, &newtio) == -1)
     {
         perror("tcsetattr");
-        return -1;
+        return DEFAULT_ERROR;
     }
 
     //printf("New termios structure set\n");
@@ -209,8 +223,12 @@ int llopen(int portNumber, int role)
 
     printf("Will open in %d mode\n", role);
 
+    // In case it is called by RX device.
     if (role == RX)
     {
+        // NO TIMEOUT
+        // Wait forever until something is received 
+        
         int state = START;
         int run = TRUE;
         unsigned char in_byte;
@@ -298,17 +316,19 @@ int llopen(int portNumber, int role)
             printf("\n");
             #endif
         }
-        else if (bytes == -1)
+        else if (bytes <= 0)
         {
-            perror("write");
-            return -1;
+            perror("Could not write frame\n");
+            return DEFAULT_ERROR;
         }
 
+        // If we reach this point connection has been established.
         printf("[LL] Connection established\n");
-
         // Return the file descriptor of the serial port
         return fd;
     }
+
+    // This portion will only execute if called as TX device.
 
     // Write SET command to begin communication
     #ifdef DEBUG
@@ -333,22 +353,14 @@ int llopen(int portNumber, int role)
     else if (bytes == -1)
     {
         perror("write");
-        return -1;
+        return DEFAULT_ERROR;
     }
 
     // Read UA command and wait
     int err = read_command(fd, UA, SET);
-    if (err == -1)
-    {
-        printf("NULL command\n");
-        return -1;
-    }
-    else if (err == -2)
-    {
-        printf("Read timed out. Did not receive any response.\n"
-               "The program will end.\n");
-        return -1;
-    }
+    if (err != 0)
+        return err;
+
     #ifdef DEBUG
     else
     {
@@ -356,6 +368,7 @@ int llopen(int portNumber, int role)
     }
     #endif
 
+    // At this point the connection has been established
     printf("[LL] Connection established\n");
 
     // Return the file descriptor of the serial port
@@ -478,7 +491,7 @@ int llwrite(int fd, unsigned char *buffer, int length)
             alarm(ALARM_TIMEOUT); // Set alarm to be triggered in 3s
             alarmEnabled = TRUE;
         }
-        if (REPEAT_SET)
+        if (RETRANSMIT)
 		{
 			bytes_written = write(fd, I_frame, 5 + frame_pos);
             if (bytes_written < 0)
@@ -487,7 +500,7 @@ int llwrite(int fd, unsigned char *buffer, int length)
                 return -1;
             }
 			sleep(1);
-			REPEAT_SET = 0;
+			RETRANSMIT = 0;
 	    }
         if (alarmCount > MAX_RETRIES)
         {
@@ -642,7 +655,7 @@ int llread(int fd, unsigned char* buffer)
         {
             alarm(3); // Set alarm to be triggered in 3s
             alarmEnabled = TRUE;
-            REPEAT_SET = FALSE;
+            RETRANSMIT = FALSE;
         }
         if (alarmCount > ALARM_TIMEOUT)
         {
