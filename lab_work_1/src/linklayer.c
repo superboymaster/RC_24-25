@@ -196,17 +196,14 @@ int llopen(int portNumber, int role)
 
     // Set input mode (non-canonical, no echo,...)
     newtio.c_lflag = 0;
-    newtio.c_cc[VTIME] = 0; // Inter-character timer unused
-    newtio.c_cc[VMIN] = 0;  // Non-Blocking
-
-    // VTIME e VMIN should be changed in order to protect with a
-    // timeout the reception of the following character(s)
+    newtio.c_cc[VTIME] = 1; // Wait 0.1s for a character to arrive
+    newtio.c_cc[VMIN] = 0;  // Can return 0 bytes if nothing has arrived at that point
 
     // Now clean the line and activate the settings for the port
     // tcflush() discards data written to the object referred to
     // by fd but not transmitted, or data received but not read,
     // depending on the value of queue_selector:
-    //   TCIFLUSH - flushes data received but not read.
+    // TCIOFLUSH - flushes data received but not read.
     tcflush(fd, TCIOFLUSH);
 
     // Set new port settings
@@ -216,9 +213,8 @@ int llopen(int portNumber, int role)
         return DEFAULT_ERROR;
     }
 
-    //printf("New termios structure set\n");
-
 	// Set alarm function handler
+    // Very important: sleep() can be interrupted by signals
     (void)signal(SIGALRM, alarmHandler);
 
     printf("Will open in %d mode\n", role);
@@ -388,10 +384,7 @@ int llwrite(int fd, unsigned char *buffer, int length)
     }
 
     // The buffer needs to be constructed into an I frame.
-    // We'll need 6 bytes for the frame header and footer, however
-    // we need to figure out how many bytes we need for the data field,
-    // taking into account byte stuffing.
-
+    // We'll need 6 bytes for the frae
     // Calculate the size of the I-frame, including byte stuffing
     int final_size = length;
     for (int i = 0; i < length; i++)
@@ -460,150 +453,204 @@ int llwrite(int fd, unsigned char *buffer, int length)
     // Add the end flag
     I_frame[4 + frame_pos] = FLAG;
 
-    // Write the I-frame to the serial port
-    int bytes_written = write(fd, I_frame, 5 + frame_pos);
-    if (bytes_written < 0)
-    {
-        perror("Error writing to serial port");
-        return -1;
-    }
-
-    #ifdef DEBUG
-    printf("%d bytes written\n", bytes_written);
-    for (int i = 0; i < 5 + frame_pos; i++)
-    {
-        printf("Sent: 0x%02X\n", I_frame[i]);
-    }
-    #endif
-
-
-    // We need to wait for an acknowledgment from the receiver.
-    unsigned char in_byte = 0;
-    int state = START;
+    // The I frame is now completed and we can send it to the receiver.
+    // We need to keep sending the I-frame until we receive an acknowledgment.
+    // State machine variables:
+    int is_ack_valid = FALSE;
     int run = TRUE;
-    unsigned char command_read[BUF_SIZE];
+    int state = START;
 
-    // Wait untill a valid command is read or timeout.
-    while (run)
+    // Variables to store read data:
+    unsigned char in_byte = 0;
+    unsigned char command_read[BUF_SIZE];
+    int bytes_written = 0;
+
+    // Reset the alarm
+    alarmCount = 0;
+    alarmEnabled = FALSE;
+    RETRANSMIT = FALSE;
+
+    while (!is_ack_valid)
     {
-        if (alarmEnabled == FALSE)
+        // Write the I-frame to the serial port
+        bytes_written = write(fd, I_frame, 5 + frame_pos);
+
+        // Check if the data was really written.
+        if (bytes_written < 0)
         {
-            alarm(ALARM_TIMEOUT); // Set alarm to be triggered in 3s
-            alarmEnabled = TRUE;
+            perror("Error writing to serial port");
+            return -1;
         }
-        if (RETRANSMIT)
-		{
-			bytes_written = write(fd, I_frame, 5 + frame_pos);
-            if (bytes_written < 0)
+
+        #ifdef DEBUG
+        printf("%d bytes written\n", bytes_written);
+        for (int i = 0; i < 5 + frame_pos; i++)
+        {
+            printf("Sent: 0x%02X\n", I_frame[i]);
+        }
+        printf("[LL] Waiting for a response from the receiver...\n");
+        #endif
+
+        // Wait until a response is received or timeout
+
+        alarmEnabled = TRUE;
+        alarm(ALARM_TIMEOUT);
+
+        while (run)
+        {
+            if (alarmCount > MAX_RETRIES)
             {
-                perror("Error writing to serial port\n");
+                // Retries exceeded
+                #ifdef DEBUG
+                printf("[LL] Time out. Returning\n");
+                #endif
+                return TIMEOUT_ERROR;
+            }
+
+            // This is triggered in case no response is received from the receiver
+            if (RETRANSMIT)
+            {
+                // Reset retransmit state
+                RETRANSMIT = FALSE;
+                
+                // Resend frame
+                bytes_written = write(fd, I_frame, 5 + frame_pos);
+                sleep(1);
+
+                #ifdef DEBUG
+                if (bytes_written <= 0)
+                {
+                    printf("[LL] Error writing to serial port. Could not retransmit. (%d)\n", bytes_written);
+                    return -1;
+                }
+                #endif
+
+                // Assuming we have not yet exceeded the retries, restart the alarm
+                alarm(ALARM_TIMEOUT);
+                alarmEnabled = TRUE;
+            }
+
+            // Read incmoming bytes from the serial port
+            int bytes = read(fd, &in_byte, 1);
+            // If no bytes are recieved skip this iteration
+            if (bytes == 0)
+            {
+                #ifdef DEBUG
+                printf("[LL] No bytes read\n");
+                #endif
+
+                continue;
+            }
+            else if (bytes < 0)
+            {
+                #ifdef DEBUG
+                printf("[LL] Error reading from serial port\n");
+                #endif
+
                 return -1;
             }
-			sleep(1);
-			RETRANSMIT = 0;
-	    }
-        if (alarmCount > MAX_RETRIES)
-        {
-            alarm(0); // Disable alarm
-            alarmEnabled = FALSE;
-            alarmCount = 0;
-            return -2;
-        }
         
-        int bytes = read(fd, &in_byte, 1);
-        
-        switch (state)
-        {
-            case START:
-                if (in_byte == FLAG)
-                    state = FLAG_RCV;
-                    command_read[0] = in_byte;
-                break;
+            // Process frame
+            switch (state)
+            {
+                case START:
+                    if (in_byte == FLAG)
+                        state = FLAG_RCV;
+                        command_read[0] = in_byte;
+                    break;
 
-            case FLAG_RCV:
-                if (in_byte == 0x03)
-                {
-                    state = A_RCV;
-                    command_read[1] = in_byte;
-                }
-                else if (in_byte == FLAG)
-                    state = FLAG_RCV;
-                else
+                case FLAG_RCV:
+                    if (in_byte == 0x03)
+                    {
+                        state = A_RCV;
+                        command_read[1] = in_byte;
+                    }
+                    else if (in_byte == FLAG)
+                        state = FLAG_RCV;
+                    else
+                        state = START;
+                    break;
+
+                case A_RCV:
+                    if (in_byte == FLAG)
+                        state = FLAG_RCV;
+                    else if (in_byte == 0x05 || in_byte == 0x85 || in_byte == 0x01 || in_byte == 0x81)
+                    {
+                        state = C_RCV;
+                        command_read[2] = in_byte;
+                    }
+                    else 
+                        state = START;
+                    break;
+
+                case C_RCV:
+                    if (in_byte == (command_read[1] ^ command_read[2]))
+                    {
+                        state = BCC_OK;
+                        command_read[3] = in_byte;
+                    }
+                    else if (in_byte == FLAG)
+                        state = FLAG_RCV;
+                    else
+                        state = START;
+                    break;
+
+                case BCC_OK:
+                    if (in_byte == FLAG) // Read the last flag
+                    {
+                        //state = STOP;
+                        run = FALSE;
+                        command_read[4] = in_byte;
+
+                        // Disable all scheduled alarms to process the command
+                        alarm(0);
+                        alarmEnabled = FALSE;
+                        alarmCount = 0;
+                    }
+                    else
+                        state = START;
+                    break;
+            
+                case STOP:
+                        run = FALSE;
+                    break;
+
+                default:
                     state = START;
-                break;
-
-            case A_RCV:
-                if (in_byte == FLAG)
-                    state = FLAG_RCV;
-                else if (in_byte == 0x05 || in_byte == 0x85 || in_byte == 0x01 || in_byte == 0x81)
-                {
-                    state = C_RCV;
-                    command_read[2] = in_byte;
-                }
-                else 
-                    state = START;
-                break;
-
-            case C_RCV:
-                if (in_byte == (command_read[1] ^ command_read[2]))
-                {
-                    state = BCC_OK;
-                    command_read[3] = in_byte;
-                }
-                else if (in_byte == FLAG)
-                    state = FLAG_RCV;
-                else
-                    state = START;
-                break;
-
-            case BCC_OK:
-                if (in_byte == FLAG)
-                {
-                    command_read[4] = in_byte;
-                    state = STOP;
-                    //printf("Read successfull\n");
-                    alarm(0); // Disable alarm
-                    alarmEnabled = FALSE;
-                    alarmCount = 0;
-                }
-                else
-                    state = START;
-                break;
-            case STOP:
-                    run = FALSE;
-                break;
-
-            default:
-                state = START;
-                break;
+                    break;
+            }
         }
 
-        //printf("New state: %d\n", state);
+        // Here we have successfully read a valid supervision frame and need to respond accordingly.
+
+        // Check if the response is an RR (Receiver Ready) or REJ (Reject)
+        // If sequence number is 0 we are expecting RR1 or REJ0
+        // If sequence number is 1 we are expecting RR0 or REJ1
+        if (command_read[2] == (sequenceNumber == 0 ? 0x85 : 0x05)) // RR1 or RR0
+        {
+            // If we got RR, the ack is valid, yay!
+            is_ack_valid = TRUE;
+
+            // We need to switch the sequence number for the next I frame
+            sequenceNumber = 1 - sequenceNumber; // Switch sequence number
+
+            #ifdef DEBUG
+            printf("[LL] Acknowledgment (RR%d) received\n", sequenceNumber);
+            #endif
+
+        }
+        else if (command_read[2] == (sequenceNumber == 0 ? 0x01 : 0x81)) // REJ0 or REJ1
+        {
+            // If we got REJ, the ack is invalid, we need to retransmit :(
+            #ifdef DEBUG
+            printf("[LL] Negative acknowledgment (REJ%d) received\n", sequenceNumber);
+            #endif
+
+            continue;
+        }
     }
 
-
-    // Check if the response is an RR (Receiver Ready) or REJ (Reject)
-    // If sequence number is 0 we are expecting RR1 or REJ0
-    // If sequence number is 1 we are expecting RR0 or REJ1
-    if (command_read[2] == (sequenceNumber == 0 ? 0x85 : 0x05)) // RR1 or RR0
-    {
-        sequenceNumber = 1 - sequenceNumber; // Switch sequence number
-
-        #ifdef DEBUG
-        printf("[LL] Acknowledgment (RR%d) received\n", sequenceNumber);
-        #endif
-
-        return bytes_written;
-    }
-    else if (command_read[2] == (sequenceNumber == 0 ? 0x01 : 0x81)) // REJ0 or REJ1
-    {
-        #ifdef DEBUG
-        printf("[LL] Negative acknowledgment (REJ%d) received\n", sequenceNumber);
-        #endif
-
-        return -2; // Retransmission can be handled by the caller
-    }
-
+    // Return the number of written bytes.
     return bytes_written;
 }
 
@@ -637,216 +684,229 @@ int llread(int fd, unsigned char* buffer)
     // back an acknowledgment to the transmitter. We will keep reading
     // until we receive the correct sequence number.
 
+    // Here will be stored the frame that is read
     unsigned char frame[2*MAX_SIZE+6]; // MAX SIZE of frame if all data is stuffed
-    unsigned char in_byte;
     int frameLength = 0;
     static int exepectedSequenceNumber = 0;
     int receivedSequenceNumber = 0;
+    int destuffedLength = 0;
 
     // State machine variables
     int state = START;
     int run = TRUE;
 
-    // Wait until a frame with a valid header is received
-    while (run)
+    // The byte that is read from the serial port
+    unsigned char in_byte;
+    int bytes = 0;
+
+    // loop until we get a valid frame
+    int is_frame_valid = FALSE;
+
+    while(!is_frame_valid)
     {
-        // just timout, no need to repeat
-        if (alarmEnabled == FALSE)
+        // Reset the state machine
+        state = START;
+        run = TRUE;
+        frameLength = 0;
+
+        // Wait until a frame with a valid header is received
+        while (run)
         {
-            alarm(3); // Set alarm to be triggered in 3s
-            alarmEnabled = TRUE;
-            RETRANSMIT = FALSE;
-        }
-        if (alarmCount > ALARM_TIMEOUT)
-        {
-            //printf("Read timed out. Did not receive any response from receiver side.\n");
-            return -2;
+            bytes = read(fd, &in_byte, 1); // Read one byte at a time
+            if (bytes == 0)
+            {
+                continue;
+            }
+            else if (bytes < 0)
+            {
+                #ifdef DEBUG
+                printf("[LL] Error reading from serial port\n");
+                #endif
+
+                return -1;
+            }
+
+            #ifdef DEBUG
+            printf("[LL] Byte read: 0x%02X\n", in_byte);
+            #endif
+
+            switch (state)
+            {
+                case START:
+                    if (in_byte == FLAG)
+                    {
+                        frameLength = 0;
+                        frame[frameLength++] = in_byte;
+                        state = FLAG_RCV;
+                    }
+                    break;
+
+                case FLAG_RCV:
+                    if (in_byte == FLAG)
+                        frameLength = 1; // Keep flag
+                    else if (in_byte == 0x03)
+                    {
+                        frame[frameLength++] = in_byte;
+                        state = A_RCV;
+                    }
+                    else
+                    {
+                        state = START;
+                        frameLength = 0; // Reset frame
+                    }
+                    break;
+
+                case A_RCV:
+                    if (in_byte == FLAG)
+                    {
+                        state = FLAG_RCV;
+                        frameLength = 1; // Keep flag
+                    }   
+                    else if (in_byte == 0x00 || in_byte == 0x40)
+                    {
+                        frame[frameLength++] = in_byte;
+                        receivedSequenceNumber = (in_byte == 0x00) ? 0 : 1;
+                        state = C_RCV;
+                    }
+                    else
+                    {
+                        state = START;
+                        frameLength = 0; // Reset frame
+                        //send_ack(fd, exepectedSequenceNumber == 0 ? 0x01 : 0x81); // Send REJ0 or REJ1
+                        printf("[LL] received invalid sequence number %02x\n", in_byte);
+                    }
+                    break;
+
+                case C_RCV:
+                    if (in_byte == FLAG)
+                    {
+                        state = FLAG_RCV;
+                        frameLength = 1; // Keep flag
+                    }
+                    else if (in_byte == (frame[1] ^ frame[2])) // Check BCC1
+                    {
+                        frame[frameLength++] = in_byte;
+                        state = BCC_OK;
+                        #ifdef DEBUG
+                        printf("[LL] BCC1 OK\n");
+                        #endif
+                    }
+                    else
+                    {
+                        state = START; // Invalid BCC1, discard frame and start again
+                        frameLength = 0; // Reset frame
+                    }
+                    break;
+
+                case BCC_OK:
+                    if (in_byte == FLAG)
+                    {
+                        frame[frameLength++] = in_byte;
+                        state = STOP;
+                        run = FALSE;
+                        #ifdef DEBUG
+                        printf("[LL] Frame received successfully!\n");
+                        #endif
+                    }
+                    else
+                        frame[frameLength++] = in_byte;
+                    break;
+
+                default:
+                    state = START;
+                    break;
+            }
         }
 
-        int bytes = read(fd, &in_byte, 1); // Read one byte at a time
-        if (bytes <= 0)
-        {
-            continue;
-        }
         #ifdef DEBUG
-        printf("[LL] Byte read: 0x%02X\n", in_byte);
+        printf("[LL] Frame length: %d\n", frameLength);
         #endif
 
-        switch (state)
+        // At this point we have a frame with a valid header
+        // We need to read the data field and BCC2, however BCC2 was
+        // performed on the original data field (not stuffed). 
+        // need to perform destuffing first.
+        
+        // Destuff BCC2
+        unsigned char rcv_BCC2;
+        int wasBCC2Stuffed = FALSE;
+        if (frame[frameLength-1 -2] == 0x7D) // Byte stuffing detected
         {
-        case START:
-            if (in_byte == FLAG)
-            {
-                frameLength = 0;
-                frame[frameLength++] = in_byte;
-                state = FLAG_RCV;
-            }
-            break;
-
-        case FLAG_RCV:
-            if (in_byte == FLAG)
-                frameLength = 1; // Keep flag
-            else if (in_byte == 0x03)
-            {
-                frame[frameLength++] = in_byte;
-                state = A_RCV;
-            }
-            else
-            {
-                state = START;
-                frameLength = 0; // Reset frame
-            }
-            break;
-
-        case A_RCV:
-            if (in_byte == FLAG)
-            {
-                state = FLAG_RCV;
-                frameLength = 1; // Keep flag
-            }   
-            else if (in_byte == 0x00 || in_byte == 0x40)
-            {
-                frame[frameLength++] = in_byte;
-                receivedSequenceNumber = (in_byte == 0x00) ? 0 : 1;
-                state = C_RCV;
-            }
-            else
-            {
-                state = START;
-                frameLength = 0; // Reset frame
-                send_ack(fd, exepectedSequenceNumber == 0 ? 0x01 : 0x81); // Send REJ0 or REJ1
-                printf("[LL] received invalid sequence number %02x\n", in_byte);
-                #ifdef DEBUG
-                printf("[LL] REJ%d sent in state machine\n", exepectedSequenceNumber);
-                #endif
-            }
-            break;
-
-        case C_RCV:
-            if (in_byte == FLAG)
-            {
-                state = FLAG_RCV;
-                frameLength = 1; // Keep flag
-            }
-            else if (in_byte == (frame[1] ^ frame[2])) // Check BCC1
-            {
-                frame[frameLength++] = in_byte;
-                state = BCC_OK;
-                #ifdef DEBUG
-                printf("[LL] BCC1 OK\n");
-                #endif
-            }
-            else
-            {
-                state = START; // Invalid BCC1, discard frame and start again
-                frameLength = 0; // Reset frame
-            }
-            break;
-
-        case BCC_OK:
-            if (in_byte == FLAG)
-            {
-                frame[frameLength++] = in_byte;
-                state = STOP;
-                run = FALSE;
-                #ifdef DEBUG
-                printf("[LL] Frame received successfully!\n");
-                #endif
-            }
-            else
-                frame[frameLength++] = in_byte;
-            break;
-
-        default:
-            state = START;
-            break;
-        }
-    }
-
-    #ifdef DEBUG
-    printf("[LL] Frame length: %d\n", frameLength);
-    #endif
-
-    // At this point we have a frame with a valid header
-    // We need to read the data field and BCC2, however BCC2 was
-    // performed on the original data field (not stuffed). 
-    // need to perform destuffing first.
-    
-    // Destuff BCC2
-    unsigned char rcv_BCC2;
-    int wasBCC2Stuffed = FALSE;
-    if (frame[frameLength-1 -2] == 0x7D) // Byte stuffing detected
-    {
-        rcv_BCC2 = frame[frameLength-1 -1] ^ 0x20; // XOR the next byte with 0x20
-        wasBCC2Stuffed = TRUE;
-    }
-    else
-    {
-        rcv_BCC2 = frame[frameLength-1 -1];
-    }
-
-    #ifdef DEBUG
-    printf("[LL] BCC2 received: 0x%02X\n", rcv_BCC2);
-    #endif
-
-    int dataLength = frameLength - 6 - wasBCC2Stuffed; // Exclude FLAG, A, C, BCC1, FLAG, and BCC2
-    #ifdef DEBUG
-    printf("[LL] Data length: %d\n", dataLength);
-    #endif
-    unsigned char destuffedData[dataLength];
-    int destuffedLength = 0;
-
-    for (int i = 4; i < dataLength+4; i++) // Begin where data begins and end before BCC2
-    {   
-        if (frame[i] == 0x7D) // Byte stuffing detected
-        {
-            destuffedData[destuffedLength++] = frame[++i] ^ 0x20; // XOR the next byte with 0x20
+            rcv_BCC2 = frame[frameLength-1 -1] ^ 0x20; // XOR the next byte with 0x20
+            wasBCC2Stuffed = TRUE;
         }
         else
         {
-            destuffedData[destuffedLength++] = frame[i];
+            rcv_BCC2 = frame[frameLength-1 -1];
         }
-    }
 
-    #ifdef DEBUG
-    printf("[LL] Destuffed data length: %d\n", destuffedLength);
-    printf("[LL] Data received after destuff: ");
-    for (int i = 0; i < destuffedLength; i++)
-    {
-        printf("0x%02X, ", destuffedData[i]);
-    }
-    printf("\n");
-    #endif
-
-    // Check if BCC2 is correct
-    unsigned char checkBCC2 = 0;
-    for (int i = 0; i < destuffedLength; i++)
-    {
-        checkBCC2 ^= destuffedData[i];
-    }
-    if (checkBCC2 != rcv_BCC2)
-    {
         #ifdef DEBUG
-        printf("[LL] BCC2 error\n");
+        printf("[LL] BCC2 received: 0x%02X\n", rcv_BCC2);
         #endif
-        send_ack(fd, receivedSequenceNumber == 0 ? 0x01 : 0x81); // Send REJ0 or REJ1
-        return -1;
+
+        int dataLength = frameLength - 6 - wasBCC2Stuffed; // Exclude FLAG, A, C, BCC1, FLAG, and BCC2
+        #ifdef DEBUG
+        printf("[LL] Data length: %d\n", dataLength);
+        #endif
+        unsigned char destuffedData[dataLength];
+        destuffedLength = 0;
+
+        for (int i = 4; i < dataLength+4; i++) // Begin where data begins and end before BCC2
+        {   
+            if (frame[i] == 0x7D) // Byte stuffing detected
+            {
+                destuffedData[destuffedLength++] = frame[++i] ^ 0x20; // XOR the next byte with 0x20
+            }
+            else
+            {
+                destuffedData[destuffedLength++] = frame[i];
+            }
+        }
+
+        #ifdef DEBUG
+        printf("[LL] Destuffed data length: %d\n", destuffedLength);
+        printf("[LL] Data received after destuff: ");
+        for (int i = 0; i < destuffedLength; i++)
+        {
+            printf("0x%02X, ", destuffedData[i]);
+        }
+        printf("\n");
+        #endif
+
+        // Check if BCC2 is correct
+        unsigned char checkBCC2 = 0;
+        for (int i = 0; i < destuffedLength; i++)
+        {
+            checkBCC2 ^= destuffedData[i];
+        }
+        if (checkBCC2 != rcv_BCC2)
+        {
+            #ifdef DEBUG
+            printf("[LL] BCC2 error\n");
+            #endif
+            send_ack(fd, receivedSequenceNumber == 0 ? 0x01 : 0x81); // Send REJ0 or REJ1
+
+            continue; // Discard frame;
+        }
+
+        #ifdef DEBUG
+        printf("[LL] BCC2 OK\n");
+        #endif
+
+        // If we reach this point the frame is valid and we can tell the receiver
+        // that we are ready for the next frame.
+
+        // Copy the data to the output buffer
+        memcpy(buffer, destuffedData, destuffedLength);
+
+        // Send acknowledgment
+        send_ack(fd, receivedSequenceNumber == 0 ? 0x85 : 0x05); // Send RR1 or RR0
+        exepectedSequenceNumber = 1 - exepectedSequenceNumber; // Switch sequence number
+
+        is_frame_valid = TRUE; // Frame is valid, exit loop
+
     }
-
-    #ifdef DEBUG
-    printf("[LL] BCC2 OK\n");
-    #endif
-
-    // If we reach this point the frame is valid and we can tell the receiver
-    // that we are ready for the next frame.
-
-    // Copy the data to the output buffer
-    memcpy(buffer, destuffedData, destuffedLength);
-
-    // Send acknowledgment
-    send_ack(fd, receivedSequenceNumber == 0 ? 0x85 : 0x05); // Send RR1 or RR0
-    exepectedSequenceNumber = 1 - exepectedSequenceNumber; // Switch sequence number
-
+    
     return destuffedLength;
 }
 

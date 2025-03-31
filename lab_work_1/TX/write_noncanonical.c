@@ -114,10 +114,6 @@ int main(int argc, char *argv[])
         printf("Error sending file size and name\n");
         exit(1);
     }
-    while (llwrite(fd, packet, strlen(argv[2]) + 8) == -2)
-    {
-        printf("Rejected, will try again\n");
-    }
 
     sleep(1);
     
