@@ -1,6 +1,6 @@
 #include "../include/linklayer.h"
 
-#define DEBUG
+//#define DEBUG
 
 // Serial port settings
 static struct termios oldtio, newtio;
@@ -476,7 +476,7 @@ int llwrite(int fd, unsigned char *buffer, int length)
         printf("[LL] Sending I-frame...\n");
         #endif
 
-        tcflush(fd, TCIOFLUSH); // Flush the serial port
+        //tcflush(fd, TCIOFLUSH); // Flush the serial port
         // Write the I-frame to the serial port
         bytes_written = write(fd, I_frame, 5 + frame_pos);
 
@@ -500,6 +500,9 @@ int llwrite(int fd, unsigned char *buffer, int length)
 
         alarmEnabled = TRUE;
         alarm(ALARM_TIMEOUT);
+
+        run = TRUE;
+        state = START;
 
         while (run)
         {
@@ -644,11 +647,16 @@ int llwrite(int fd, unsigned char *buffer, int length)
             #endif
 
         }
-        else if (command_read[2] == (sequenceNumber == 0 ? 0x01 : 0x81)) // REJ0 or REJ1
+        else if (command_read[2] == 0x01 || command_read[2] == 0x81) // REJ0 or REJ1
         {
             // If we got REJ, the ack is invalid, we need to retransmit :(
             #ifdef DEBUG
             printf("[LL] Negative acknowledgment (REJ%d) received\n", sequenceNumber);
+            for (int i = 0; i < BUF_SIZE; i++)
+            {
+                printf("0x%02X, ", command_read[i]);
+            }
+            printf("\n");
             #endif
 
             continue;
@@ -778,7 +786,7 @@ int llread(int fd, unsigned char* buffer)
                         state = START;
                         frameLength = 0; // Reset frame
                         //send_ack(fd, exepectedSequenceNumber == 0 ? 0x01 : 0x81); // Send REJ0 or REJ1
-                        printf("[LL] received invalid sequence number %02x\n", in_byte);
+                        //printf("[LL] received invalid sequence number %02x\n", in_byte);
                     }
                     break;
 

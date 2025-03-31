@@ -11,7 +11,7 @@
 #include <termios.h>
 #include <unistd.h>
 
-#define DEBUG
+//#define DEBUG
 
 #include "../include/linklayer.h"
 
@@ -28,6 +28,26 @@
 #define FILE_NAME 0x01
 
 #define ROLE RX
+
+#define PROGRESS_BAR_WIDTH 50 // Width of the progress bar
+
+// Function to display the progress bar
+void display_progress_bar(long total_bytes, long fileSize)
+{
+    double progress = (double)total_bytes / fileSize * 100;
+    int bar_width = (int)(progress / 100 * PROGRESS_BAR_WIDTH);
+
+    printf("\r<"); 
+    for (int i = 0; i < PROGRESS_BAR_WIDTH; i++)
+    {
+        if (i < bar_width)
+            printf("=");
+        else
+            printf(" ");
+    }
+    printf("> %.2f%%", progress); // Display the percentage
+    fflush(stdout); // Ensure the output is displayed immediately
+}
 
 int main(int argc, char *argv[])
 {
@@ -132,11 +152,11 @@ int main(int argc, char *argv[])
     while (run)
     {
         data_packet_size = llread(fd, data_packet);
-        if (data_packet_size <= 0)
+        /*if (data_packet_size <= 0)
         {
             printf("Error reading data packet (%d)\n", data_packet_size);
             exit(1);
-        }
+        }*/
 
         #ifdef DEBUG
         printf("Received packet:\n");
@@ -159,10 +179,13 @@ int main(int argc, char *argv[])
                     printf("Error writing to file\n");
                     exit(1);
                 }
+
+                display_progress_bar(total_bytes, fileSize);
+
                 break;
             case END:
                 run = FALSE;
-                printf("Transmitter request the END of communication\n");
+                printf("\nTransmitter request the END of communication\n");
                 if (total_bytes != fileSize)
                 {
                     printf("Warning: File size mismatch\n");
@@ -172,7 +195,7 @@ int main(int argc, char *argv[])
                 else
                 {
                     printf("File received successfully\n");
-                    printf("File size: %ld bytes\n", fileSize);
+                    //printf("File size: %ld bytes\n", fileSize);
                     printf("Terminating communication\n");
                 }
 
