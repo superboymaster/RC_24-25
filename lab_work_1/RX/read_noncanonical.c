@@ -122,17 +122,19 @@ int main(int argc, char *argv[])
 
     printf("Receiving file: %s\nSize: %ld bytes\n", file_name, fileSize);
 
-    // Read the file data
+    // Read the file data while checking for END packets
+    int run = TRUE;
+
     unsigned char data_packet[MAX_SIZE];
     int data_packet_size = 0;
     int total_bytes = 0;
 
-    while (total_bytes < fileSize)
+    while (run)
     {
         data_packet_size = llread(fd, data_packet);
-        if (data_packet_size < 0)
+        if (data_packet_size <= 0)
         {
-            printf("Error reading data packet\n");
+            printf("Error reading data packet (%d)\n", data_packet_size);
             exit(1);
         }
 
@@ -145,27 +147,40 @@ int main(int argc, char *argv[])
         printf("\n");
         #endif
 
-        if (data_packet[0] != DATA)
+        switch (data_packet[0])
         {
-            printf("Error: Expected DATA packet\n");
-            exit(1);
-        }
+            case DATA: 
+                int data_size = (data_packet[1] << 8) | data_packet[2];
+                total_bytes += data_size;
 
-        int data_size = (data_packet[1] << 8) | data_packet[2];
-        total_bytes += data_size;
+                // Write the data received to the file
+                if (write(file, &data_packet[3], data_size) < 0)
+                {
+                    printf("Error writing to file\n");
+                    exit(1);
+                }
+                break;
+            case END:
+                run = FALSE;
+                printf("Transmitter request the END of communication\n");
+                if (total_bytes != fileSize)
+                {
+                    printf("Warning: File size mismatch\n");
+                    printf("Expected: %ld bytes\n", fileSize);
+                    printf("Received: %d bytes\n", total_bytes);
+                }
+                else
+                {
+                    printf("File received successfully\n");
+                    printf("File size: %ld bytes\n", fileSize);
+                    printf("Terminating communication\n");
+                }
 
-        if (write(file, &data_packet[3], data_size) < 0)
-        {
-            printf("Error writing to file\n");
-            exit(1);
+                llclose(fd, RX);
+                close(file);
+                break;
         }
     }
-
-    // Close the file and the connection
-    
-
-    close(file);
-    llclose(fd, RX);
 
     return 0;
 }

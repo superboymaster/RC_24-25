@@ -472,13 +472,18 @@ int llwrite(int fd, unsigned char *buffer, int length)
 
     while (!is_ack_valid)
     {
+        #ifdef DEBUG
+        printf("[LL] Sending I-frame...\n");
+        #endif
+
+        tcflush(fd, TCIOFLUSH); // Flush the serial port
         // Write the I-frame to the serial port
         bytes_written = write(fd, I_frame, 5 + frame_pos);
 
         // Check if the data was really written.
         if (bytes_written < 0)
         {
-            perror("Error writing to serial port");
+            printf("Error writing to serial port\n");
             return -1;
         }
 
@@ -515,7 +520,7 @@ int llwrite(int fd, unsigned char *buffer, int length)
                 
                 // Resend frame
                 bytes_written = write(fd, I_frame, 5 + frame_pos);
-                sleep(1);
+                //sleep(1);
 
                 #ifdef DEBUG
                 if (bytes_written <= 0)
@@ -658,7 +663,7 @@ int send_ack(int fd, unsigned char C_BYTE)
 {
     unsigned char ACK[5] = {0x7E, 0x03, C_BYTE, 0x03^C_BYTE, 0x7E};
     int bytes = write(fd, ACK, BUF_SIZE);
-    sleep(1);
+    //sleep(1);
 
     if (bytes == BUF_SIZE)
     {

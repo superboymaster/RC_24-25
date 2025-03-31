@@ -136,30 +136,21 @@ int main(int argc, char *argv[])
             packet[i + 3] = file_data[i];
         }
         
-        
         bytes = llwrite(fd, packet, packet_size);
-        if (bytes == -1)
+        if (bytes <= 0)
         {
-            printf("Error sending file\n");
+            printf("Error sending file data. Code: %d\n", bytes);
             exit(1);
-        }
-        while (llwrite(fd, file_data, bytesRead) == -2)
-        {
-            printf("Rejected, will try again\n");
         }
     }
 
     // Send END packet
     packet[0] = END;
     bytes = llwrite(fd, packet, 1); 
-    if (bytes == -1)
+    if (bytes <= 0)
     {
-        printf("Error sending file\n");
+        printf("Error sending END. Code: %d\n", bytes);
         exit(1);
-    }
-    while (llwrite(fd, packet, 1) == -2)
-    {
-        printf("Rejected, will try again\n");
     }
 
     llclose(fd, TX);
