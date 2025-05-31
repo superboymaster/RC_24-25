@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <ctype.h>
 
 #include "ftp.h"
 
@@ -127,6 +128,7 @@ long ftp_get_file_size(ftp_connection_t* conn, const char* filepath) {
 
 // Function to display a progress bar
 void display_progress(long bytes_transferred, long total_size, double speed_kbps) {
+    // if SIZE not supported
     if (total_size <= 0) {
         printf("\rTransferred: %ld bytes | Speed: %.1f KB/s", 
                bytes_transferred, speed_kbps);
@@ -137,14 +139,14 @@ void display_progress(long bytes_transferred, long total_size, double speed_kbps
     double progress = (double)bytes_transferred / total_size;
     int filled = (int)(progress * PROGRESS_BAR_WIDTH);
     
+    // For some reason some terminals do not support carriage return (\r) and it displays impropperly
     printf("\r[");
     for (int i = 0; i < PROGRESS_BAR_WIDTH; i++) {
         if (i < filled) printf("=");
         else if (i == filled) printf(">");
         else printf(" ");
     }
-    printf("] %.1f%% (%ld/%ld bytes) | %.1f KB/s", 
-           progress * 100, bytes_transferred, total_size, speed_kbps);
+    printf("] %.1f%% (%ld/%ld bytes) | %.1f KB/s", progress * 100, bytes_transferred, total_size, speed_kbps);
     fflush(stdout);
 }
 
@@ -283,34 +285,91 @@ int ftp_connect(ftp_url_t* parsed, ftp_connection_t* conn){
 
 int ftp_read_response(ftp_connection_t* conn) {
 
-    char *line_end;
-    int total_read = 0;
+    if (!conn) {
+        fprintf(stderr, "ftp_read_response(): NULL connection parameter\n");
+        return -1;
+    }
     
-    do {
+    // Clear the response buffer
+    memset(conn->response, 0, FTP_BUFFER_SIZE);
+    
+    int total_read = 0;
+    int response_code = -1;
+    char *line_start = conn->response;
+    char *line_end;
+    
+    // Read until the response buffer is full or we have a complete response
+    while (total_read < FTP_BUFFER_SIZE - 1) {
+
+        // Read data from socket
         int bytes = read(conn->control_socket, conn->response + total_read, FTP_BUFFER_SIZE - total_read - 1);
-        if (bytes <= 0) 
+        if (bytes < 0) {
+            perror("read(): control socket");
             return -1;
+        }
+        if (bytes == 0) {
+            // Connection closed by server
+            return -1;
+        }
         
         total_read += bytes;
         conn->response[total_read] = '\0';
         
-        line_end = strstr(conn->response, "\r\n");
+        // Process all complete lines in the buffer
+        while ((line_end = strstr(line_start, "\r\n")) != NULL) {
+            // Null-terminate the current line
+            *line_end = '\0';
+            
+            #ifdef DEBUG
+            printf("[DEBUG] FTP Response line: %s\n", line_start);
+            #endif
+            
+            // Parse response code from the first line or continuation lines
+            if (strlen(line_start) >= 3 && isdigit(line_start[0]) && isdigit(line_start[1]) && isdigit(line_start[2])) {
+                
+                // Check if this is a single-line response (space after code)
+                // or multi-line response (dash after code)
+                if (line_start[3] == ' ') {
+                    // Single-line response or end of multi-line response
+                    if (response_code == -1) {
+                        // First response line
+                        // Convert to digit
+                        response_code = (line_start[0] - '0') * 100 + (line_start[1] - '0') * 10 + (line_start[2] - '0');
+                    }
+                    #ifdef DEBUG
+                    printf("[DEBUG] Complete FTP Response (code %d):\n-----\n%s\n-----\n", 
+                           response_code, conn->response);
+                    #endif
 
-    } while (!line_end && total_read < FTP_BUFFER_SIZE - 1);
+                    // No more lines from the same response so we can return
+                    return response_code;
+                    
+                } else if (line_start[3] == '-') {
+                    // Start of multi-line response
+                    if (response_code == -1) {
+                        response_code = (line_start[0] - '0') * 100 + (line_start[1] - '0') * 10 + (line_start[2] - '0');
+                    }
+                    // No return since we want to continue reading the lines
+                }
+                // If it's neither space nor dash after the code, it might be 
+                // a continuation line, just continue
+            }
+            
+            // Move to the next line
+            line_start = line_end + 2; // Skip \r\n
+        }
+        
+        // If we have a partial line at the end, move it to the beginning
+        if (line_start > conn->response && *line_start != '\0') {
+            int remaining = strlen(line_start);
+            memmove(conn->response, line_start, remaining + 1);
+            total_read = remaining;
+            line_start = conn->response;
+        }
+    }
     
-    // Invalid response if no line end string found
-    if (total_read < 3) 
-        return -1;
-    
-    char code_str[4];
-    strncpy(code_str, conn->response, 3);
-    code_str[3] = '\0';
-
-    #ifdef DEBUG
-    printf("[DEBUG] FTP Response:\n-----\n%s-----\n", conn->response);
-    #endif
-    
-    return atoi(code_str);
+    fprintf(stderr, "FTP response buffer overflow or incomplete response\n");
+    return -1;
 }
 
 int ftp_login(ftp_url_t* parsed, ftp_connection_t* conn){
@@ -408,14 +467,6 @@ int ftp_retrieve(ftp_url_t* parsed, ftp_connection_t* conn, int fd) {
         return -1;
     }
 
-    // Get file size for progress tracking
-    long total_size = ftp_get_file_size(conn, parsed->filepath);
-    if (total_size > 0) {
-        printf("File size: %ld bytes\n", total_size);
-    } else {
-        printf("File size unknown\n"); // SIZE command failed or is not supported
-    }
-
     // Send TYPE command (Set binary mode)
     if (write(conn->control_socket, "TYPE I\r\n", 8) < 0) {
         perror("write(): TYPE command");
@@ -428,6 +479,14 @@ int ftp_retrieve(ftp_url_t* parsed, ftp_connection_t* conn, int fd) {
     if (rcv_code != FTP_CODE_TYPE_OK) {
         fprintf(stderr, "Unexpected response code after TYPE command: %d\n", rcv_code);
         return -1;
+    }
+
+    // Get file size for progress tracking
+    long total_size = ftp_get_file_size(conn, parsed->filepath);
+    if (total_size > 0) {
+        printf("File size: %ld bytes\n", total_size);
+    } else {
+        printf("File size unknown\n"); // SIZE command failed or is not supported
     }
 
     // Begin passive mode transfer
